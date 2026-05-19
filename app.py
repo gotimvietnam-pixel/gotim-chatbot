@@ -223,9 +223,20 @@ def fb_verify():
     return "Forbidden", 403
 
 
+def _process_message(sender_id: str, text: str):
+    """Handle AI + send in background — keeps webhook response instant."""
+    if any(kw in text.lower() for kw in BOOKING_KEYWORDS):
+        notify_admin(sender_id, text)
+    reply = ask_ai(sender_id, text)
+    if not reply:
+        reply = f"Cảm ơn Anh/Chị! 💜 Để được hỗ trợ nhanh, vui lòng gọi Hotline: {HOTLINE} hoặc nhắn Zalo: {ZALO_NUMBER} ạ!"
+    fb_send(sender_id, reply)
+    log_crm(sender_id, sender_id, text, reply)
+
+
 @app.post("/webhook")
 def fb_webhook():
-    """Nhận events trực tiếp từ Facebook (bypass Make.com hoàn toàn)"""
+    """Nhận events trực tiếp từ Facebook — trả 200 OK ngay, xử lý AI trong background."""
     data = request.json or {}
     if data.get("object") != "page":
         return jsonify({"status": "ignored"}), 200
@@ -240,13 +251,7 @@ def fb_webhook():
                 continue
 
             log.info(f"📩 FB direct [{sender_id[:8]}]: {text[:60]}")
-            if any(kw in text.lower() for kw in BOOKING_KEYWORDS):
-                notify_admin(sender_id, text)
-            reply = ask_ai(sender_id, text)
-            if not reply:
-                reply = f"Cảm ơn Anh/Chị! 💜 Để được hỗ trợ nhanh, vui lòng gọi Hotline: {HOTLINE} hoặc nhắn Zalo: {ZALO_NUMBER} ạ!"
-            fb_send(sender_id, reply)
-            log_crm(sender_id, sender_id, text, reply)
+            Thread(target=_process_message, args=(sender_id, text), daemon=True).start()
 
     return jsonify({"status": "ok"}), 200
 
