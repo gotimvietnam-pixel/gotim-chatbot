@@ -12,6 +12,7 @@ import os
 import json
 import logging
 from datetime import datetime
+from threading import Thread
 from flask import Flask, request, jsonify
 import requests
 
@@ -28,6 +29,7 @@ PAGE_ACCESS_TOKEN  = os.environ.get('FB_PAGE_TOKEN', '')
 PAGE_ID            = os.environ.get('FB_PAGE_ID', '1140598805792501')
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
 VERIFY_TOKEN       = os.environ.get('WEBHOOK_VERIFY_TOKEN', 'gotim_secret_2026')
+GSHEET_WEBHOOK_URL = os.environ.get('GSHEET_WEBHOOK_URL', '')  # Google Apps Script URL
 
 # ─── SERVICE INFO ───
 HOTLINE     = '0943 50 50 77'
@@ -63,6 +65,24 @@ KỊCH BẢN ƯU TIÊN:
 - "SHIP/GIAO" → Phân loại giao hàng/mua hộ → Thu thập thông tin
 - Hỏi giá → Báo bảng giá + CTA đặt xe
 - Chào hỏi → Chào lại + giới thiệu ngắn + hỏi nhu cầu"""
+
+# ─── CRM LOGGING → GOOGLE SHEETS (via Apps Script webhook, no OAuth) ───
+def log_crm(sender_id: str, sender_name: str, message: str, reply: str):
+    if not GSHEET_WEBHOOK_URL:
+        return
+    def _post():
+        try:
+            requests.post(GSHEET_WEBHOOK_URL, json={
+                "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "sender_id": sender_id,
+                "sender_name": sender_name,
+                "message": message,
+                "reply": reply
+            }, timeout=5)
+        except Exception:
+            pass  # non-blocking, never crash bot
+    Thread(target=_post, daemon=True).start()
+
 
 # ─── IN-MEMORY CONVERSATION (Railway không có persistent disk) ───
 # Lưu lịch sử tối đa 50 users, mỗi user tối đa 10 messages
@@ -197,6 +217,7 @@ def fb_webhook():
             if not reply:
                 reply = f"Cảm ơn Anh/Chị! 💜 Để được hỗ trợ nhanh, vui lòng gọi Hotline: {HOTLINE} hoặc nhắn Zalo: {ZALO_NUMBER} ạ!"
             fb_send(sender_id, reply)
+            log_crm(sender_id, sender_id, text, reply)
 
     return jsonify({"status": "ok"}), 200
 
