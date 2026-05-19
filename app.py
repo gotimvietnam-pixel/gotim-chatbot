@@ -29,7 +29,11 @@ PAGE_ACCESS_TOKEN  = os.environ.get('FB_PAGE_TOKEN', '')
 PAGE_ID            = os.environ.get('FB_PAGE_ID', '1140598805792501')
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
 VERIFY_TOKEN       = os.environ.get('WEBHOOK_VERIFY_TOKEN', 'gotim_secret_2026')
-GSHEET_WEBHOOK_URL = os.environ.get('GSHEET_WEBHOOK_URL', '')  # Google Apps Script URL
+GSHEET_WEBHOOK_URL = os.environ.get('GSHEET_WEBHOOK_URL', '')
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+TELEGRAM_CHAT_ID   = os.environ.get('TELEGRAM_CHAT_ID', '')
+
+BOOKING_KEYWORDS = ['đặt xe', 'đặt', 'dat xe', 'book', 'ship', 'giao hàng', 'giao hang', 'mua hộ', 'mua ho', 'đón', 'don toi', 'chở', 'cho toi']
 
 # ─── SERVICE INFO ───
 HOTLINE     = '0943 50 50 77'
@@ -65,6 +69,29 @@ KỊCH BẢN ƯU TIÊN:
 - "SHIP/GIAO" → Phân loại giao hàng/mua hộ → Thu thập thông tin
 - Hỏi giá → Báo bảng giá + CTA đặt xe
 - Chào hỏi → Chào lại + giới thiệu ngắn + hỏi nhu cầu"""
+
+# ─── ADMIN TELEGRAM NOTIFICATION (booking intent detected) ───
+def notify_admin(sender_id: str, message: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    def _send():
+        try:
+            text = (
+                f"🛵 *KHÁCH ĐẶT XE — Go Tím*\n\n"
+                f"👤 ID: `{sender_id}`\n"
+                f"💬 Tin: {message}\n"
+                f"🕐 {datetime.now().strftime('%H:%M %d/%m/%Y')}\n\n"
+                f"➡️ Vào Messenger page để reply!"
+            )
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"},
+                timeout=5
+            )
+        except Exception:
+            pass
+    Thread(target=_send, daemon=True).start()
+
 
 # ─── CRM LOGGING → GOOGLE SHEETS (via Apps Script webhook, no OAuth) ───
 def log_crm(sender_id: str, sender_name: str, message: str, reply: str):
@@ -213,6 +240,8 @@ def fb_webhook():
                 continue
 
             log.info(f"📩 FB direct [{sender_id[:8]}]: {text[:60]}")
+            if any(kw in text.lower() for kw in BOOKING_KEYWORDS):
+                notify_admin(sender_id, text)
             reply = ask_ai(sender_id, text)
             if not reply:
                 reply = f"Cảm ơn Anh/Chị! 💜 Để được hỗ trợ nhanh, vui lòng gọi Hotline: {HOTLINE} hoặc nhắn Zalo: {ZALO_NUMBER} ạ!"
