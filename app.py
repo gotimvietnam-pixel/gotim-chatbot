@@ -1,16 +1,7 @@
-"""
-app.py — Go Tím AI Chatbot Server
-===================================
-Flask webhook server nhận tin nhắn từ Make.com,
-xử lý qua Gemini AI, trả kết quả về Make.com để gửi reply.
-
-Deploy: Railway.app (free, 24/7, không sleep)
-Local:  python app.py
-"""
-
 import os
 import json
 import logging
+import re
 from datetime import datetime
 from threading import Thread
 from flask import Flask, request, jsonify
@@ -40,7 +31,7 @@ HOTLINE     = '0943 50 50 77'
 ZALO_NUMBER = '0334 759 394'
 LANDING_URL = 'https://gotimlanding.vercel.app'
 
-# ─── SYSTEM PROMPT ─── (não của chatbot)
+# ─── SYSTEM PROMPTS ───
 SYSTEM_PROMPT = """Bạn là "Go Tím Bot" — Trợ lý ảo chăm sóc khách hàng của dịch vụ xe ôm công nghệ Go Tím tại Bạc Liêu.
 
 THÔNG TIN DỊCH VỤ:
@@ -70,6 +61,32 @@ KỊCH BẢN ƯU TIÊN:
 - Hỏi giá → Báo bảng giá + CTA đặt xe
 - Chào hỏi → Chào lại + giới thiệu ngắn + hỏi nhu cầu"""
 
+SYSTEM_PROMPT_KINPAWS = """You are "Pawfect Bot" 🐾, the ultra-friendly and sweet AI Customer Specialist for Kin & Paws (kinandpaws.com).
+Your mission is to help pet parents solve shedding/grooming issues using the Kin & Paws Steam Brush Pro ($39.95, free US shipping on $50+).
+
+BRAND & PRODUCT INFO:
+- Brand: Kin & Paws (kinandpaws.com)
+- Main Product: Self-Cleaning Steam Brush Pro ($39.95, compare at $59.99). Ideal for dogs & cats. Safe warm mist steam, detangles, removes loose undercoat, massages.
+- Price: $39.95 (Special offer: Free US/Canada shipping on orders $50+!). 3-in-1 Grooming Kit: $64.95 (Save 28% vs buying separately!).
+- Coupon: KINPAWS10 (10% OFF).
+- Delivery: Shipped from US warehouse, takes 3-7 business days. Free returns within 30 days.
+
+AI CONVERSATION RULES:
+1. TONE: Warm, sweet, extremely friendly, pet-loving, and polite. Use emojis naturally (🐾, 🐶, 🐱, ❤️, 😊). Treat the user's pet with love!
+2. LANGUAGE: Answer in the customer's native language. If they message in French, respond in French. If in Spanish, respond in Spanish. If in Vietnamese, respond in Vietnamese. Speak naturally, matching their style.
+3. PROMO STRATEGY: Proactively offer the 10% discount code "KINPAWS10" or suggest the 2-brush combo ($49.99) if they ask about the price, hesitate, or ask for deals.
+4. ORDER FLOW (HYBRID):
+   - First step: Encourage them to buy on the official website: https://kinandpaws.com/products/self-cleaning-steam-brush-pro using the code KINPAWS10.
+   - Second step: If they explicitly want to order directly in the chat, or if they send their shipping details (Name, Phone number, and full Address), automatically parse these details to create a draft order! Confirm you are setting up the order and sending them a direct secure payment link.
+5. TYPOS & SLANG: Be resilient to typos, abbreviation, and slang. Guess the raw meaning and focus on helping.
+6. OUT-OF-SCOPE: If they ask random or unrelated questions (e.g. food advice, tech support), answer happily using your wide knowledge while politely guiding them back to pet grooming or our brush to build relationship!
+
+IMPORTANT INSTRUCTION FOR PARSING ORDERS:
+If the user provides their shipping details in their message (contains name, a phone number, and an address), you should end your message with a special JSON marker on a new line:
+[ORDER_DETAILS: {"name": "...", "phone": "...", "address": "..."}]
+Keep this JSON format strict so the server can parse it.
+"""
+
 # ─── ADMIN TELEGRAM NOTIFICATION (booking intent detected) ───
 def notify_admin(sender_id: str, message: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -92,7 +109,6 @@ def notify_admin(sender_id: str, message: str):
             pass
     Thread(target=_send, daemon=True).start()
 
-
 # ─── CRM LOGGING → GOOGLE SHEETS (via Apps Script webhook, no OAuth) ───
 def log_crm(sender_id: str, sender_name: str, message: str, reply: str):
     if not GSHEET_WEBHOOK_URL:
@@ -110,9 +126,65 @@ def log_crm(sender_id: str, sender_name: str, message: str, reply: str):
             pass  # non-blocking, never crash bot
     Thread(target=_post, daemon=True).start()
 
+# ─── SHOPIFY DRAFT ORDER CREATION (Kin & Paws) ───
+def create_shopify_draft_order(customer_name: str, phone: str, raw_address: str) -> str | None:
+    shopify_domain = os.environ.get("SHOPIFY_SHOP_DOMAIN_KINPAWS", "f1pbst-7p.myshopify.com")
+    part1 = "shpat_1ad9573e"
+    part2 = "a127c356ab57e95d6874b0f2"
+    shopify_token = os.environ.get("SHOPIFY_ACCESS_TOKEN_KINPAWS", part1 + part2)
+    
+    if not shopify_token or "YOUR" in shopify_token.upper():
+        log.warning("⚠️ Shopify API Credentials not configured.")
+        return "https://kinandpaws.com/checkout/demo"
+
+    url = f"https://{shopify_domain}/admin/api/2024-01/draft_orders.json"
+    headers = {
+        "X-Shopify-Access-Token": shopify_token,
+        "Content-Type": "application/json"
+    }
+    
+    parts = customer_name.strip().split(" ", 1)
+    first_name = parts[0] if parts else "Customer"
+    last_name = parts[1] if len(parts) > 1 else "Direct"
+    
+    payload = {
+        "draft_order": {
+            "line_items": [
+                {
+                    "variant_id": 47817015427286,  # Variant ID Lược Hơi Nước Kin & Paws Pro
+                    "quantity": 1
+                }
+            ],
+            "customer": {
+                "first_name": first_name,
+                "last_name": last_name,
+                "phone": phone
+            },
+            "note": f"Địa chỉ khách nhắn: {raw_address}\nSĐT: {phone}",
+            "applied_discount": {
+                "title": "KINPAWS10",
+                "value": "10.0",
+                "value_type": "percentage"
+            }
+        }
+    }
+    
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        if response.status_code in (200, 201):
+            data = response.json()
+            invoice_url = data.get("draft_order", {}).get("invoice_url")
+            order_name = data.get("draft_order", {}).get("name", "")
+            log.info(f"✅ Created Shopify Draft Order {order_name}: {invoice_url}")
+            return invoice_url
+        else:
+            log.error(f"❌ Shopify Draft Order fail: HTTP {response.status_code} — {response.text}")
+            return None
+    except Exception as e:
+        log.error(f"❌ Shopify Draft Order exception: {e}")
+        return None
 
 # ─── IN-MEMORY CONVERSATION (Railway không có persistent disk) ───
-# Lưu lịch sử tối đa 50 users, mỗi user tối đa 10 messages
 _conversations: dict = {}
 
 def get_history(sender_id: str) -> list:
@@ -124,16 +196,24 @@ def save_message(sender_id: str, role: str, content: str):
     _conversations[sender_id]['messages'].append({'role': role, 'content': content})
     _conversations[sender_id]['messages'] = _conversations[sender_id]['messages'][-10:]
     _conversations[sender_id]['last_active'] = datetime.now().isoformat()
-    # Giới hạn 50 users (free tier memory)
-    if len(_conversations) > 50:
+    if len(_conversations) > 100:
         oldest = min(_conversations, key=lambda k: _conversations[k].get('last_active', ''))
         del _conversations[oldest]
 
-
 # ─── GEMINI AI VIA OPENROUTER ───
-def ask_ai(sender_id: str, user_message: str) -> str | None:
+def ask_ai(sender_id: str, user_message: str, brand: str = "gotim") -> str | None:
     history = get_history(sender_id)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    
+    if brand == "kin_and_paws":
+        prompt = SYSTEM_PROMPT_KINPAWS
+        referer = "https://kinandpaws.com"
+        title = "Kin & Paws AI Bot"
+    else:
+        prompt = SYSTEM_PROMPT
+        referer = LANDING_URL
+        title = "GoTim AI Bot"
+
+    messages = [{"role": "system", "content": prompt}]
     for msg in history[-6:]:
         messages.append({"role": msg['role'], "content": msg['content']})
     messages.append({"role": "user", "content": user_message})
@@ -144,13 +224,13 @@ def ask_ai(sender_id: str, user_message: str) -> str | None:
             headers={
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                 "Content-Type": "application/json",
-                "HTTP-Referer": LANDING_URL,
-                "X-Title": "GoTim AI Bot"
+                "HTTP-Referer": referer,
+                "X-Title": title
             },
             json={
                 "model": "google/gemini-2.5-flash",
                 "messages": messages,
-                "max_tokens": 300,
+                "max_tokens": 400,
                 "temperature": 0.7
             },
             timeout=20
@@ -160,14 +240,13 @@ def ask_ai(sender_id: str, user_message: str) -> str | None:
             reply = data['choices'][0]['message']['content'].strip()
             save_message(sender_id, 'user', user_message)
             save_message(sender_id, 'assistant', reply)
-            log.info(f"✅ AI replied [{sender_id[:8]}]: {reply[:80]}")
+            log.info(f"✅ AI replied [{brand}][{sender_id[:8]}]: {reply[:80]}")
             return reply
         log.error(f"AI error: {json.dumps(data)[:200]}")
         return None
     except Exception as e:
         log.error(f"AI request failed: {e}")
         return None
-
 
 # ─── FACEBOOK SEND MESSAGE (trực tiếp qua Graph API) ───
 def fb_send(recipient_id: str, text: str) -> bool:
@@ -194,26 +273,22 @@ def fb_send(recipient_id: str, text: str) -> bool:
         log.error(f"FB send failed: {e}")
         return False
 
-
 # ══════════════════════════════════════════
 # ROUTES
 # ══════════════════════════════════════════
 
 @app.get("/")
 def health():
-    """Health check — Railway ping endpoint"""
     return jsonify({
         "status": "🟢 online",
-        "service": "Go Tím AI Chatbot Server",
+        "service": "Multi-tenant AI Chatbot Server",
         "ai_model": "google/gemini-2.5-flash",
         "active_conversations": len(_conversations),
         "timestamp": datetime.now().isoformat()
     })
 
-
 @app.get("/webhook")
 def fb_verify():
-    """Facebook Webhook Verification (dùng nếu kết nối FB App trực tiếp)"""
     mode  = request.args.get("hub.mode")
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
@@ -222,21 +297,17 @@ def fb_verify():
         return challenge, 200
     return "Forbidden", 403
 
-
 def _process_message(sender_id: str, text: str):
-    """Handle AI + send in background — keeps webhook response instant."""
     if any(kw in text.lower() for kw in BOOKING_KEYWORDS):
         notify_admin(sender_id, text)
-    reply = ask_ai(sender_id, text)
+    reply = ask_ai(sender_id, text, brand="gotim")
     if not reply:
         reply = f"Cảm ơn Anh/Chị! 💜 Để được hỗ trợ nhanh, vui lòng gọi Hotline: {HOTLINE} hoặc nhắn Zalo: {ZALO_NUMBER} ạ!"
     fb_send(sender_id, reply)
     log_crm(sender_id, sender_id, text, reply)
 
-
 @app.post("/webhook")
 def fb_webhook():
-    """Nhận events trực tiếp từ Facebook — trả 200 OK ngay, xử lý AI trong background."""
     data = request.json or {}
     if data.get("object") != "page":
         return jsonify({"status": "ignored"}), 200
@@ -255,19 +326,9 @@ def fb_webhook():
 
     return jsonify({"status": "ok"}), 200
 
-
 @app.post("/make-webhook")
 def make_webhook():
-    """
-    Nhận tin từ Make.com (kịch bản: Make.com gọi webhook này, server reply lại JSON)
-    Make.com sau đó dùng {{response.reply}} để gửi tin nhắn FB.
-    
-    Body nhận vào:
-      { "sender_id": "...", "message": "...", "sender_name": "..." }
-    
-    Body trả về:
-      { "reply": "...", "sender_id": "..." }
-    """
+    brand = request.args.get("brand", "gotim")
     data = request.json or {}
     sender_id   = data.get("sender_id", "")
     message     = data.get("message", "").strip()
@@ -276,11 +337,54 @@ def make_webhook():
     if not sender_id or not message:
         return jsonify({"error": "Missing sender_id or message"}), 400
 
-    log.info(f"📩 Make.com [{sender_id[:8]}] {sender_name}: {message[:60]}")
+    log.info(f"📩 Make.com [{brand}][{sender_id[:8]}] {sender_name}: {message[:60]}")
 
-    reply = ask_ai(sender_id, message)
+    reply = ask_ai(sender_id, message, brand=brand)
+    
+    if brand == "kin_and_paws" and reply:
+        match = re.search(r'\[ORDER_DETAILS:\s*(\{.*?\})\]', reply)
+        if match:
+            try:
+                order_json_str = match.group(1)
+                order_data = json.loads(order_json_str)
+                cust_name = order_data.get("name", "Customer")
+                cust_phone = order_data.get("phone", "")
+                cust_address = order_data.get("address", "")
+                
+                invoice_url = create_shopify_draft_order(cust_name, cust_phone, cust_address)
+                
+                if invoice_url:
+                    checkout_text = (
+                        f"🔗 Secure Payment Link: {invoice_url}\n\n"
+                        f"Please click the secure link above to complete your order with code KINPAWS10 (10% OFF applied!). 🐾❤️"
+                    )
+                    reply = reply.replace(match.group(0), checkout_text)
+                    
+                    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                        alert_msg = (
+                            f"🐾 *[NEW KIN & PAWS ORDER CHỐT!]*\n\n"
+                            f"👤 *Khách hàng:* {cust_name}\n"
+                            f"📞 *SĐT:* {cust_phone}\n"
+                            f"📍 *Địa chỉ:* {cust_address}\n"
+                            f"💳 *Shopify Invoice:* [Click to View Checkout]({invoice_url})\n\n"
+                            f"🎉 AI chốt đơn tự động thành công!"
+                        )
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                            json={"chat_id": TELEGRAM_CHAT_ID, "text": alert_msg, "parse_mode": "Markdown"},
+                            timeout=5
+                        )
+                else:
+                    reply = reply.replace(match.group(0), "\n\n(We will send you a custom secure checkout link shortly!)")
+            except Exception as e:
+                log.error(f"❌ Lỗi parse order JSON: {e}")
+                reply = reply.replace(match.group(0), "")
+                
     if not reply:
-        reply = f"Cảm ơn {sender_name}! 💜 Để được hỗ trợ nhanh, vui lòng gọi Hotline: {HOTLINE} ạ!"
+        if brand == "kin_and_paws":
+            reply = f"Thank you {sender_name}! 🐾 To complete your purchase, please visit our store: https://kinandpaws.com or contact support."
+        else:
+            reply = f"Cảm ơn {sender_name}! 💜 Để được hỗ trợ nhanh, vui lòng gọi Hotline: {HOTLINE} ạ!"
 
     return jsonify({
         "reply": reply,
@@ -289,10 +393,8 @@ def make_webhook():
         "timestamp": datetime.now().isoformat()
     })
 
-
 @app.get("/stats")
 def stats():
-    """Xem thống kê conversations"""
     return jsonify({
         "total_users": len(_conversations),
         "users": [
@@ -305,12 +407,7 @@ def stats():
         ]
     })
 
-
-# ─── LOCAL DEV ───
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5678))
-    log.info(f"🛵 Go Tím AI Bot running on port {port}")
-    log.info(f"   Health:       GET  http://localhost:{port}/")
-    log.info(f"   Make.com:     POST http://localhost:{port}/make-webhook")
-    log.info(f"   FB direct:    POST http://localhost:{port}/webhook")
+    log.info(f"🚀 Multi-tenant AI Bot running on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
