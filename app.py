@@ -26,6 +26,7 @@ TELEGRAM_CHAT_ID     = os.environ.get('TELEGRAM_CHAT_ID', '')
 # KOAE — Kin & Paws page token (may differ from GoTim token)
 KINPAWS_PAGE_TOKEN   = os.environ.get('IG_PAGE_ACCESS_TOKEN', PAGE_ACCESS_TOKEN)
 KINPAWS_FB_PAGE_ID   = os.environ.get('KINPAWS_FB_PAGE_ID', '969486676240771')
+KINPAWS_IG_PAGE_ID   = os.environ.get('IG_PAGE_ID', '17841479942296744')  # @kinandpaws
 
 BOOKING_KEYWORDS = ['đặt xe', 'đặt', 'dat xe', 'book', 'ship', 'giao hàng', 'giao hang', 'mua hộ', 'mua ho', 'đón', 'don toi', 'chở', 'cho toi']
 
