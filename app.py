@@ -16,13 +16,16 @@ logging.basicConfig(
 log = logging.getLogger('GoTimBot')
 
 # ─── CREDENTIALS (đọc từ env vars — set trong Railway dashboard) ───
-PAGE_ACCESS_TOKEN  = os.environ.get('FB_PAGE_TOKEN', '')
-PAGE_ID            = os.environ.get('FB_PAGE_ID', '1140598805792501')
-OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
-VERIFY_TOKEN       = os.environ.get('WEBHOOK_VERIFY_TOKEN', 'gotim_secret_2026')
-GSHEET_WEBHOOK_URL = os.environ.get('GSHEET_WEBHOOK_URL', '')
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
-TELEGRAM_CHAT_ID   = os.environ.get('TELEGRAM_CHAT_ID', '')
+PAGE_ACCESS_TOKEN    = os.environ.get('FB_PAGE_TOKEN', '')
+PAGE_ID              = os.environ.get('FB_PAGE_ID', '1140598805792501')
+OPENROUTER_API_KEY   = os.environ.get('OPENROUTER_API_KEY', '')
+VERIFY_TOKEN         = os.environ.get('WEBHOOK_VERIFY_TOKEN', 'gotim_secret_2026')
+GSHEET_WEBHOOK_URL   = os.environ.get('GSHEET_WEBHOOK_URL', '')
+TELEGRAM_BOT_TOKEN   = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+TELEGRAM_CHAT_ID     = os.environ.get('TELEGRAM_CHAT_ID', '')
+# KOAE — Kin & Paws page token (may differ from GoTim token)
+KINPAWS_PAGE_TOKEN   = os.environ.get('IG_PAGE_ACCESS_TOKEN', PAGE_ACCESS_TOKEN)
+KINPAWS_FB_PAGE_ID   = os.environ.get('KINPAWS_FB_PAGE_ID', '969486676240771')
 
 BOOKING_KEYWORDS = ['đặt xe', 'đặt', 'dat xe', 'book', 'ship', 'giao hàng', 'giao hang', 'mua hộ', 'mua ho', 'đón', 'don toi', 'chở', 'cho toi']
 
@@ -86,6 +89,21 @@ If the user provides their shipping details in their message (contains name, a p
 [ORDER_DETAILS: {"name": "...", "phone": "...", "address": "..."}]
 Keep this JSON format strict so the server can parse it.
 """
+
+# KOAE — Comment Reply Prompt (concise, multi-language)
+COMMENT_REPLY_PROMPT = """You are the social media manager for Kin & Paws pet grooming brand.
+A customer left this public comment on our Facebook/Instagram post:
+\"{comment_text}\"
+
+Reply rules:
+1. Detect the comment language and respond in the SAME language
+2. Warm, friendly tone — 1-2 emojis max (choose from: 🐾 ❤️ 🐶 🐱 😊)
+3. Acknowledge their comment naturally (empathize, celebrate, or answer)
+4. If they ask price/buying: mention KINPAWS10 discount + kinandpaws.com
+5. MAX 2-3 sentences — comment replies must be SHORT
+6. Do NOT use generic "Hi!" opener every time — vary your opening
+
+Output: Just the reply text, nothing else."""
 
 # ─── ADMIN TELEGRAM NOTIFICATION (booking intent detected) ───
 def notify_admin(sender_id: str, message: str):
@@ -251,11 +269,11 @@ def ask_ai(sender_id: str, user_message: str, brand: str = "gotim") -> str | Non
 # ─── FACEBOOK SEND MESSAGE (trực tiếp qua Graph API) ───
 def fb_send(recipient_id: str, text: str) -> bool:
     if not PAGE_ACCESS_TOKEN:
-        log.warning("FB_PAGE_TOKEN chưa set!")
+        log.warning("FB_PAGE_TOKEN chua set!")
         return False
     try:
         resp = requests.post(
-            f"https://graph.facebook.com/v19.0/me/messages",
+            "https://graph.facebook.com/v19.0/me/messages",
             params={"access_token": PAGE_ACCESS_TOKEN},
             json={
                 "recipient": {"id": recipient_id},
@@ -272,6 +290,75 @@ def fb_send(recipient_id: str, text: str) -> bool:
     except Exception as e:
         log.error(f"FB send failed: {e}")
         return False
+
+# ─── KOAE: REPLY TO A FACEBOOK/INSTAGRAM COMMENT ───
+def reply_to_comment(comment_id: str, reply_text: str, token: str = None) -> bool:
+    """Post a reply to a public comment via Graph API."""
+    access_token = token or KINPAWS_PAGE_TOKEN or PAGE_ACCESS_TOKEN
+    if not access_token:
+        log.info(f"[DEMO COMMENT REPLY] -> {comment_id}: {reply_text[:80]}")
+        return True
+    try:
+        resp = requests.post(
+            f"https://graph.facebook.com/v22.0/{comment_id}/comments",
+            json={"message": reply_text, "access_token": access_token},
+            timeout=15
+        )
+        if resp.status_code == 200:
+            log.info(f"Comment reply OK: {comment_id}")
+            return True
+        log.error(f"Comment reply fail: {resp.status_code} {resp.text[:120]}")
+    except Exception as e:
+        log.error(f"Comment reply exception: {e}")
+    return False
+
+# ─── KOAE: GENERATE AI COMMENT REPLY ───
+def generate_comment_reply(comment_text: str) -> str:
+    """Use Gemini to generate a short, localized comment reply."""
+    if not OPENROUTER_API_KEY:
+        return "Thank you for your comment! 🐾 Visit kinandpaws.com for our grooming tools!"
+    prompt = COMMENT_REPLY_PROMPT.format(comment_text=comment_text)
+    try:
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://kinandpaws.com",
+                "X-Title": "Kin & Paws KOAE",
+            },
+            json={
+                "model": "google/gemini-2.5-flash",
+                "messages": [
+                    {"role": "system", "content": "You are a helpful social media manager for Kin & Paws pet grooming brand."},
+                    {"role": "user",   "content": prompt},
+                ],
+                "max_tokens": 120,
+                "temperature": 0.75,
+            },
+            timeout=20
+        )
+        if resp.status_code == 200:
+            return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        log.error(f"Comment AI error: {e}")
+    return "Thank you for your comment! 🐾 Visit kinandpaws.com!"
+
+# ─── KOAE: PROCESS COMMENT EVENT FROM WEBHOOK ───
+def _process_comment_event(entry: dict):
+    """Handle FB Feed comment change events from the /webhook POST."""
+    for change in entry.get("changes", []):
+        field = change.get("field", "")
+        value = change.get("value", {})
+        if field == "feed" and value.get("item") == "comment":
+            comment_id   = value.get("comment_id", "")
+            comment_text = value.get("message", "")
+            sender_name  = value.get("from", {}).get("name", "Guest")
+            if not comment_text or not comment_id:
+                continue
+            log.info(f"FB Comment from '{sender_name}': '{comment_text[:60]}'")
+            reply = generate_comment_reply(comment_text)
+            Thread(target=reply_to_comment, args=(comment_id, reply), daemon=True).start()
 
 # ══════════════════════════════════════════
 # ROUTES
@@ -313,18 +400,33 @@ def fb_webhook():
         return jsonify({"status": "ignored"}), 200
 
     for entry in data.get("entry", []):
+        # DM / Messenger events
         for event in entry.get("messaging", []):
             sender_id = event.get("sender", {}).get("id")
             msg = event.get("message", {})
             text = msg.get("text", "").strip()
-
             if not sender_id or not text or msg.get("is_echo"):
                 continue
-
-            log.info(f"📩 FB direct [{sender_id[:8]}]: {text[:60]}")
+            log.info(f"FB DM [{sender_id[:8]}]: {text[:60]}")
             Thread(target=_process_message, args=(sender_id, text), daemon=True).start()
 
+        # KOAE: Comment events (FB Feed changes)
+        _process_comment_event(entry)
+
     return jsonify({"status": "ok"}), 200
+
+@app.post("/koae-comment")
+def koae_comment_endpoint():
+    """Direct endpoint: Make.com or any caller can POST a comment for auto-reply."""
+    data       = request.json or {}
+    comment_id = data.get("comment_id", "")
+    comment_text = data.get("comment_text", "").strip()
+    if not comment_id or not comment_text:
+        return jsonify({"error": "Missing comment_id or comment_text"}), 400
+    reply = generate_comment_reply(comment_text)
+    success = reply_to_comment(comment_id, reply)
+    log.info(f"KOAE comment reply [{'OK' if success else 'FAIL'}]: {reply[:80]}")
+    return jsonify({"reply": reply, "comment_id": comment_id, "success": success})
 
 @app.post("/make-webhook")
 def make_webhook():
